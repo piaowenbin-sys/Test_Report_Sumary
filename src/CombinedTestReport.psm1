@@ -191,4 +191,265 @@ function Assert-ReportSet {
     return @($ordered)
 }
 
-Export-ModuleMember -Function Get-ReportModel, Assert-ReportSet
+function Select-PatternItems {
+    param([object[]]$Items, [string]$Pattern)
+    return @($Items | Where-Object { $_.Text -match $Pattern })
+}
+
+function Select-C104Items {
+    param([object[]]$Items)
+    $parent = $Items | Where-Object { $_.Text -match '(?i)C104' } | Select-Object -First 1
+    if ($null -eq $parent) { return @() }
+    return @($parent)
+}
+
+function Select-SwitchItems {
+    param([object[]]$Items)
+    $switchItems = Select-PatternItems -Items $Items -Pattern '(?i)_SW_IN$'
+    $c104Parent = $Items | Where-Object { $_.Text -match '(?i)C104' } | Select-Object -First 1
+    if ($null -eq $c104Parent) { return @($switchItems) }
+    $prefix = $c104Parent.Number + '.'
+    return @($switchItems | Where-Object { -not $_.Number.StartsWith($prefix, [StringComparison]::Ordinal) })
+}
+
+function Get-PrefixedHref {
+    param([string]$Href, [string]$Position)
+    if ($Href.StartsWith('#', [StringComparison]::Ordinal)) { return '#' + $Position + '__' + $Href.Substring(1) }
+    return $Href
+}
+
+function Get-VerdictCellClass {
+    param([string]$Verdict)
+    if ($Verdict -eq 'Pass') { return 'PositiveResultCell' }
+    if ($Verdict -eq 'Fail') { return 'NegativeResultCell' }
+    return 'NumberCell'
+}
+
+function ConvertTo-SummaryItemRows {
+    param([object[]]$Items, [object[]]$AllItems, [string]$Position, [int]$GroupIndex)
+    if ($Items.Count -eq 0) { return '<tr><td class="NumberCell" colspan="4">No matching test item</td></tr>' }
+    $rows = [Collections.Generic.List[string]]::new()
+    for ($itemIndex = 0; $itemIndex -lt $Items.Count; $itemIndex++) {
+        $item = $Items[$itemIndex]
+        $safeNumber = [Net.WebUtility]::HtmlEncode($item.Number)
+        $safeText = [Net.WebUtility]::HtmlEncode($item.Text)
+        $safeName = [Net.WebUtility]::HtmlEncode($item.Text)
+        $safeHref = [Net.WebUtility]::HtmlEncode((Get-PrefixedHref -Href $item.Href -Position $Position))
+        $cellClass = Get-VerdictCellClass $item.EffectiveVerdict
+        $descendants = @(Get-Descendants -Items $AllItems -Parent $item)
+        $childId = $Position + '__tc-details-' + $GroupIndex + '-' + $itemIndex
+        $childButton = ''
+        if ($descendants.Count -gt 0) {
+            $childButton = '<button type="button" class="tc-toggle" onclick="toggleCombinedReport(''' + $childId + ''', this)">Child TC ' + $descendants.Count + ' - Show details</button>'
+        }
+        $rows.Add(@"
+<tr data-test-name="$safeName" data-verdict="$($item.EffectiveVerdict)"><td class="DefineCell">$safeNumber</td><td class="DefaultCell"><a href="$safeHref">$safeText</a></td><td class="$cellClass">$($item.EffectiveVerdict)</td><td class="DefaultCell">$childButton</td></tr>
+"@)
+        if ($descendants.Count -gt 0) {
+            $childRows = [Collections.Generic.List[string]]::new()
+            foreach ($child in $descendants) {
+                $childNumber = [Net.WebUtility]::HtmlEncode($child.Number)
+                $childText = [Net.WebUtility]::HtmlEncode($child.Text)
+                $childName = [Net.WebUtility]::HtmlEncode($child.Text)
+                $childHref = [Net.WebUtility]::HtmlEncode((Get-PrefixedHref -Href $child.Href -Position $Position))
+                $childClass = Get-VerdictCellClass $child.EffectiveVerdict
+                $childRows.Add('<tr data-test-name="' + $childName + '" data-verdict="' + $child.EffectiveVerdict + '"><td class="DefineCell">' + $childNumber + '</td><td class="DefaultCell"><a href="' + $childHref + '">' + $childText + '</a></td><td class="' + $childClass + '">' + $child.EffectiveVerdict + '</td></tr>')
+            }
+            $rows.Add('<tr><td class="DefaultCell" colspan="4"><div id="' + $childId + '" class="tc-details" style="display:none"><table class="OverviewTable nested-table"><tr><td class="DefineCell"><b>Child TC</b></td><td class="DefineCell"><b>Test item</b></td><td class="DefineCell"><b>Verdict</b></td></tr>' + ($childRows -join '') + '</table></div></td></tr>')
+        }
+    }
+    return ($rows -join '')
+}
+
+function New-FunctionalSummaryHtml {
+    param([object]$Report)
+    $groups = @(
+        [pscustomobject]@{ Major = 'Diagnostic'; Key = 'C104'; Label = 'C104'; Pattern = $null },
+        [pscustomobject]@{ Major = ''; Key = 'ForceControl'; Label = '&#44053;&#51228;&#44396;&#46041;'; Pattern = '(?i)^IO_Control_Check_' },
+        [pscustomobject]@{ Major = ''; Key = 'ECU_ID'; Label = 'ECU ID'; Pattern = '(?i)(^|_)DID_Check$|ECU[ _-]?ID' },
+        [pscustomobject]@{ Major = 'Input'; Key = 'PWM'; Label = 'PWM'; Pattern = '(?i)^P_CRASH_UNLOCK_IN$' },
+        [pscustomobject]@{ Major = ''; Key = 'Switch'; Label = 'Switch'; Pattern = '(?i)_SW_IN$' },
+        [pscustomobject]@{ Major = ''; Key = 'Sensor'; Label = 'Sensor'; Pattern = '(?i)(SNSR_IN|^A_IS_ECM_V_IN$|^P_HALL_)' },
+        [pscustomobject]@{ Major = ''; Key = 'Vbat'; Label = 'Vbat'; Pattern = '(?i)^B\+_POWER$|^VBAT$' },
+        [pscustomobject]@{ Major = 'Output'; Key = 'HS'; Label = 'HS'; Pattern = '(?i)^(L_DEFOG_OUT|L_ECM_V_OUT)' },
+        [pscustomobject]@{ Major = ''; Key = 'Motor'; Label = 'Motor'; Pattern = '(?i)_MTR_' }
+    )
+    $rows = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $groups.Count; $index++) {
+        $group = $groups[$index]
+        $matched = @(if ($group.Key -eq 'C104') {
+            @(Select-C104Items -Items $Report.TestItems)
+        } elseif ($group.Key -eq 'Switch') {
+            @(Select-SwitchItems -Items $Report.TestItems)
+        } else {
+            @(Select-PatternItems -Items $Report.TestItems -Pattern $group.Pattern)
+        })
+        $pass = @($matched | Where-Object EffectiveVerdict -eq 'Pass').Count
+        $fail = @($matched | Where-Object EffectiveVerdict -eq 'Fail').Count
+        $na = @($matched | Where-Object EffectiveVerdict -eq 'NA').Count
+        $detailsId = $Report.Position + '__functional-summary-details-' + $index
+        $majorCell = if ([string]::IsNullOrWhiteSpace($group.Major)) { '<td class="DefineCell"></td>' } else { '<td class="DefineCell"><b>' + $group.Major + '</b></td>' }
+        $detailRows = ConvertTo-SummaryItemRows -Items $matched -AllItems $Report.TestItems -Position $Report.Position -GroupIndex $index
+        $rows.Add(@"
+<tr data-category="$($group.Key)">$majorCell<td class="DefineCell"><b>$($group.Label)</b></td><td class="DefaultCell"><button type="button" class="summary-toggle" onclick="toggleCombinedReport('$detailsId', this)">$($group.Label) ($($matched.Count)) | Pass $pass | Fail $fail | NA $na - Show details</button><div id="$detailsId" class="summary-details" style="display:none"><table class="OverviewTable"><tr><td class="DefineCell"><b>TC</b></td><td class="DefineCell"><b>Test item</b></td><td class="DefineCell"><b>Verdict</b></td><td class="DefineCell"><b>Children</b></td></tr>$detailRows</table></div></td></tr>
+"@)
+    }
+    return '<div class="functional-summary" data-position="' + $Report.Position + '"><div class="Heading4">Functional Test Summary</div><div class="Indentation"><table class="OverviewTable"><tr><td class="DefineCell"><b>Area</b></td><td class="DefineCell"><b>Category</b></td><td class="DefineCell"><b>Results and details</b></td></tr>' + ($rows -join '') + '</table></div></div><!-- FUNCTIONAL_SUMMARY_END -->'
+}
+
+function ConvertTo-PrefixedBody {
+    param([string]$BodyHtml, [string]$Position)
+    $seen = @{}
+    $identifierPattern = '(?<![\w:-])(?<attr>(?:id|name))\s*=\s*(?<quote>["''])(?<value>.*?)(?:\k<quote>)'
+    $converted = [regex]::Replace($BodyHtml, $identifierPattern, {
+        param($match)
+        $attr = $match.Groups['attr'].Value.ToLowerInvariant()
+        $value = $match.Groups['value'].Value
+        $key = $attr + '|' + $value
+        if ($seen.ContainsKey($key)) { $seen[$key]++ } else { $seen[$key] = 1 }
+        $suffix = if ($seen[$key] -gt 1) { '__dup' + $seen[$key] } else { '' }
+        $match.Groups['attr'].Value + '=' + $match.Groups['quote'].Value + $Position + '__' + $value + $suffix + $match.Groups['quote'].Value
+    }, [Text.RegularExpressions.RegexOptions]'IgnoreCase')
+    $hrefPattern = '(?<attr>\bhref)\s*=\s*(?<quote>["''])#(?<value>.*?)(?:\k<quote>)'
+    return [regex]::Replace($converted, $hrefPattern, {
+        param($match)
+        $match.Groups['attr'].Value + '=' + $match.Groups['quote'].Value + '#' + $Position + '__' + $match.Groups['value'].Value + $match.Groups['quote'].Value
+    }, [Text.RegularExpressions.RegexOptions]'IgnoreCase')
+}
+
+function Get-PositionVerdict {
+    param([object]$Statistics)
+    if ($Statistics.Fail -gt 0 -or $Statistics.Error -gt 0) { return 'Fail' }
+    if ($Statistics.Executed -gt 0 -and $Statistics.Pass -eq $Statistics.Executed -and $Statistics.Inconclusive -eq 0) { return 'Pass' }
+    return 'NA'
+}
+
+function New-CombinedOverviewHtml {
+    param([object[]]$Reports)
+    $rows = foreach ($report in $Reports) {
+        $verdict = Get-PositionVerdict $report.Statistics
+        $class = Get-VerdictCellClass $verdict
+        '<tr><td class="DefineCell"><a href="#position-' + $report.Position + '">' + $report.Position + '</a></td><td class="DefaultCell">' + [Net.WebUtility]::HtmlEncode($report.TestBegin) + '</td><td class="DefaultCell">' + [Net.WebUtility]::HtmlEncode($report.TestEnd) + '</td><td class="NumberCell">' + $report.Statistics.Executed + '</td><td class="NumberCellPositiveResult">' + $report.Statistics.Pass + '</td><td class="NumberCell">' + $report.Statistics.Fail + '</td><td class="NumberCell">' + $report.Statistics.Inconclusive + '</td><td class="NumberCell">' + $report.Statistics.Error + '</td><td class="' + $class + '">' + $verdict + '</td></tr>'
+    }
+    return @"
+<div id="combined-overview" class="combined-overview">
+<h1>RS4PE / LHD / DRV &middot; AST &middot; RL &middot; RR</h1>
+<table class="OverviewTable metadata-table"><tr><td class="DefineCell">Project</td><td>RS4PE</td><td class="DefineCell">Drive Type</td><td>LHD</td></tr><tr><td class="DefineCell">Positions</td><td>DRV / AST / RL / RR</td><td class="DefineCell">EOL Variant</td><td>All_DTC_List (defined in test design)</td></tr></table>
+<div class="position-navigation"><a href="#position-DRV">DRV</a><a href="#position-AST">AST</a><a href="#position-RL">RL</a><a href="#position-RR">RR</a></div>
+<h2>Position Result Overview</h2><table class="OverviewTable"><tr><td class="DefineCell">Position</td><td class="DefineCell">Begin</td><td class="DefineCell">End</td><td class="DefineCell">Executed</td><td class="DefineCell">Pass</td><td class="DefineCell">Fail</td><td class="DefineCell">Inconclusive</td><td class="DefineCell">Error</td><td class="DefineCell">Verdict</td></tr>$($rows -join '')</table>
+</div>
+"@
+}
+
+function New-PositionSectionHtml {
+    param([object]$Report)
+    $summary = New-FunctionalSummaryHtml -Report $Report
+    $body = ConvertTo-PrefixedBody -BodyHtml $Report.BodyHtml -Position $Report.Position
+    return @"
+<section id="position-$($Report.Position)" class="position-report" data-position="$($Report.Position)" data-source-file="$([Net.WebUtility]::HtmlEncode($Report.FileName))" data-source-record-count="$($Report.TestItems.Count)" data-executed="$($Report.Statistics.Executed)" data-pass="$($Report.Statistics.Pass)" data-fail="$($Report.Statistics.Fail)" data-inconclusive="$($Report.Statistics.Inconclusive)" data-error="$($Report.Statistics.Error)">
+<div class="position-banner"><h2>$($Report.Project) / $($Report.DriveType) / $($Report.Position)</h2><a href="#combined-overview">Back to overview</a></div>
+$summary
+<!-- ORIGINAL_REPORT_$($Report.Position)_BEGIN -->$body<!-- ORIGINAL_REPORT_$($Report.Position)_END -->
+<div class="position-footer"><a href="#combined-overview">Back to overview</a></div>
+</section><!-- POSITION_$($Report.Position)_END -->
+"@
+}
+
+function Get-IdentifierValues {
+    param([string]$Html, [string]$Attribute)
+    $pattern = '(?<![\w:-])' + [regex]::Escape($Attribute) + '\s*=\s*(?:"(?<double>[^"]*)"|''(?<single>[^'']*)'')'
+    return @([regex]::Matches($Html, $pattern, [Text.RegularExpressions.RegexOptions]'IgnoreCase') | ForEach-Object {
+        if ($_.Groups['double'].Success) { $_.Groups['double'].Value } else { $_.Groups['single'].Value }
+    })
+}
+
+function Get-PositionSectionFromOutput {
+    param([string]$Html, [string]$Position)
+    $startToken = '<section id="position-' + $Position + '"'
+    $endToken = '<!-- POSITION_' + $Position + '_END -->'
+    $start = $Html.IndexOf($startToken, [StringComparison]::Ordinal)
+    $end = if ($start -ge 0) { $Html.IndexOf($endToken, $start, [StringComparison]::Ordinal) } else { -1 }
+    if ($start -lt 0 -or $end -lt 0) { throw "Position section missing: $Position" }
+    return $Html.Substring($start, ($end + $endToken.Length) - $start)
+}
+
+function Test-CombinedReport {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][object[]]$Reports)
+    $ordered = @(Assert-ReportSet -Reports $Reports)
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $html = [IO.File]::ReadAllText($resolved, [Text.Encoding]::UTF8)
+    if ($html -notmatch '(?is)<html\b[^>]*>.*</html\s*>' -or -not $html.Contains('RS4PE / LHD / DRV')) { throw 'Combined HTML structure is invalid.' }
+
+    $ids = @(Get-IdentifierValues -Html $html -Attribute 'id')
+    $names = @(Get-IdentifierValues -Html $html -Attribute 'name')
+    foreach ($collection in @($ids, $names)) {
+        $duplicates = @($collection | Group-Object | Where-Object Count -gt 1)
+        if ($duplicates.Count -gt 0) { throw "Duplicate identifier: $($duplicates[0].Name)" }
+    }
+    $targets = @{}
+    foreach ($identifier in @($ids + $names)) { $targets[$identifier] = $true }
+    $unresolved = [Collections.Generic.List[string]]::new()
+    $fragmentMatches = [regex]::Matches($html, '\bhref\s*=\s*(?:"#(?<double>[^"]+)"|''#(?<single>[^'']+)'')', [Text.RegularExpressions.RegexOptions]'IgnoreCase')
+    foreach ($match in $fragmentMatches) {
+        $target = if ($match.Groups['double'].Success) { $match.Groups['double'].Value } else { $match.Groups['single'].Value }
+        if (-not $targets.ContainsKey([Net.WebUtility]::HtmlDecode($target))) { $unresolved.Add($target) }
+    }
+    if ($unresolved.Count -gt 0) { throw "Unresolved fragment link: $($unresolved[0])" }
+
+    $positionResults = foreach ($report in $ordered) {
+        $section = Get-PositionSectionFromOutput -Html $html -Position $report.Position
+        $begin = '<!-- ORIGINAL_REPORT_' + $report.Position + '_BEGIN -->'
+        $end = '<!-- ORIGINAL_REPORT_' + $report.Position + '_END -->'
+        $bodyStart = $section.IndexOf($begin, [StringComparison]::Ordinal)
+        $bodyEnd = $section.IndexOf($end, $bodyStart + $begin.Length, [StringComparison]::Ordinal)
+        if ($bodyStart -lt 0 -or $bodyEnd -lt 0) { throw "Original report body missing: $($report.Position)" }
+        $embedded = $section.Substring($bodyStart + $begin.Length, $bodyEnd - ($bodyStart + $begin.Length))
+        $expected = ConvertTo-PrefixedBody -BodyHtml $report.BodyHtml -Position $report.Position
+        if ($embedded -ne $expected) { throw "Embedded report body mismatch: $($report.Position)" }
+
+        $expectedAttributes = @{
+            'data-source-record-count' = $report.TestItems.Count
+            'data-executed' = $report.Statistics.Executed
+            'data-pass' = $report.Statistics.Pass
+            'data-fail' = $report.Statistics.Fail
+            'data-inconclusive' = $report.Statistics.Inconclusive
+            'data-error' = $report.Statistics.Error
+        }
+        foreach ($key in $expectedAttributes.Keys) {
+            if ($section -notmatch ([regex]::Escape($key + '="' + $expectedAttributes[$key] + '"'))) { throw "Displayed statistics mismatch: $($report.Position)/$key" }
+        }
+        $currentHash = (Get-FileHash -LiteralPath $report.Path -Algorithm SHA256).Hash
+        if ($currentHash -ne $report.SourceHash) { throw "Source hash changed: $($report.Position)" }
+        [pscustomobject]@{ Position = $report.Position; RecordCount = $report.TestItems.Count; Executed = $report.Statistics.Executed; Verdict = Get-PositionVerdict $report.Statistics }
+    }
+    [pscustomobject]@{
+        Path = $resolved
+        OutputHash = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
+        UnresolvedLinkCount = $unresolved.Count
+        Positions = @($positionResults)
+    }
+}
+
+function New-CombinedReport {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object[]]$Reports, [Parameter(Mandatory = $true)][string]$OutputPath)
+    $ordered = @(Assert-ReportSet -Reports $Reports)
+    $parent = Split-Path -Parent $OutputPath
+    if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $sourceHead = [regex]::Replace($ordered[0].HeadHtml, '(?is)<title\b[^>]*>.*?</title\s*>', '')
+    $overview = New-CombinedOverviewHtml -Reports $ordered
+    $sections = @($ordered | ForEach-Object { New-PositionSectionHtml -Report $_ })
+    $html = @"
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>RS4PE LHD Combined Test Report</title>$sourceHead
+<style>
+html{scroll-behavior:smooth} body{margin:0;background:#f4f7fb;color:#172b4d}.combined-overview,.position-report{max-width:1500px;margin:18px auto;padding:22px;background:#fff;border:1px solid #b8c8dd;border-radius:8px;box-shadow:0 2px 8px rgba(28,69,120,.12)}.combined-overview h1,.position-banner h2{color:#0b4f9c}.position-navigation{display:flex;gap:10px;margin:18px 0}.position-navigation a,.position-banner a,.position-footer a{background:#1769aa;color:#fff!important;padding:8px 16px;border-radius:5px;text-decoration:none}.position-banner{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #1769aa;margin-bottom:15px}.summary-toggle,.tc-toggle{cursor:pointer;border:1px solid #6689b8;background:#eaf2ff;color:#173b6c;border-radius:4px;padding:4px 9px}.nested-table{width:calc(100% - 24px)!important;margin:6px 0 6px 24px}.position-footer{margin-top:24px;padding-top:12px;border-top:1px solid #b8c8dd}.metadata-table{margin-bottom:12px}
+</style>
+<script>function toggleCombinedReport(id,button){var node=document.getElementById(id);if(!node){return;}var open=node.style.display==='none';node.style.display=open?'block':'none';button.setAttribute('aria-expanded',open?'true':'false');}</script>
+</head><body>$overview$($sections -join '')</body></html>
+"@
+    [IO.File]::WriteAllText($OutputPath, $html, [Text.UTF8Encoding]::new($false))
+    return Test-CombinedReport -Path $OutputPath -Reports $ordered
+}
+
+Export-ModuleMember -Function Get-ReportModel, Assert-ReportSet, New-CombinedReport, Test-CombinedReport

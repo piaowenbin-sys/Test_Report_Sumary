@@ -35,6 +35,7 @@ function Invoke-Test {
     } catch {
         $script:Failed++
         Write-Output "FAIL: $Name - $($_.Exception.Message)"
+        Write-Output $_.ScriptStackTrace
     }
 }
 
@@ -70,6 +71,40 @@ $closing
 function New-ReportStub {
     param([string]$Position, [string]$Project = 'RS4PE', [string]$DriveType = 'LHD', [string]$EolVariant = 'All_DTC_List (defined in test design)')
     [pscustomobject]@{ Position = $Position; Project = $Project; DriveType = $DriveType; EolVariant = $EolVariant }
+}
+
+function Get-RealReportSet {
+    $root = 'C:\Users\USER.K1109684\Downloads\TestReport'
+    $names = @(
+        '2026-10-08_08-18-49_RS4_Test_Report.html',
+        '2026-10-08_10-16-56_RS4_Test_Report.html',
+        '2026-10-08_10-42-10_RS4_Test_Report.html',
+        '2026-10-08_11-01-20_RS4_Test_Report.html'
+    )
+    $reports = @($names | ForEach-Object { Get-ReportModel -Path (Join-Path $root $_) })
+    return @(Assert-ReportSet -Reports $reports)
+}
+
+function Get-BuildContext {
+    if ($null -ne $script:BuildContext) { return $script:BuildContext }
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('combined-report-build-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $path = Join-Path $root 'combined.html'
+    $reports = @(Get-RealReportSet)
+    $reports[0].BodyHtml += '<a href="https://example.com/external-doc">External reference</a>'
+    $before = @{}
+    foreach ($report in $reports) { $before[$report.Position] = (Get-FileHash -LiteralPath $report.Path -Algorithm SHA256).Hash }
+    $result = New-CombinedReport -Reports $reports -OutputPath $path
+    $html = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+    $script:BuildContext = [pscustomobject]@{ Root = $root; Path = $path; Reports = $reports; Before = $before; Result = $result; Html = $html }
+    return $script:BuildContext
+}
+
+function Get-PositionSectionHtml {
+    param([string]$Html, [string]$Position)
+    $match = [regex]::Match($Html, '<section\b[^>]*id="position-' + [regex]::Escape($Position) + '"[^>]*>(?<section>.*?)</section>', [Text.RegularExpressions.RegexOptions]'IgnoreCase,Singleline')
+    if (-not $match.Success) { throw "Position section missing: $Position" }
+    return $match.Value
 }
 
 $modulePath = Join-Path $PSScriptRoot '..\src\CombinedTestReport.psm1'
@@ -134,9 +169,102 @@ if ($Group -in @('Parse', 'All')) {
     }
 }
 
+if ($Group -in @('Build', 'All')) {
+    Invoke-Test 'builds_four_position_overview_in_required_order' {
+        $context = Get-BuildContext
+        Assert-True ($context.Html.Contains('RS4PE / LHD / DRV')) 'Combined title missing.'
+        $previous = -1
+        foreach ($position in @('DRV', 'AST', 'RL', 'RR')) {
+            $index = $context.Html.IndexOf('id="position-' + $position + '"', [StringComparison]::Ordinal)
+            Assert-True ($index -gt $previous) "Position order incorrect: $position"
+            $previous = $index
+        }
+    }
+
+    Invoke-Test 'includes_nine_nested_summary_categories_per_position' {
+        $context = Get-BuildContext
+        $categories = @('C104', 'ForceControl', 'ECU_ID', 'PWM', 'Switch', 'Sensor', 'Vbat', 'HS', 'Motor')
+        foreach ($position in @('DRV', 'AST', 'RL', 'RR')) {
+            $section = Get-PositionSectionHtml -Html $context.Html -Position $position
+            foreach ($category in $categories) {
+                Assert-Equal ([regex]::Matches($section, 'data-category="' + [regex]::Escape($category) + '"').Count) 1 "Category count error: $position/$category"
+            }
+            Assert-True ($section.Contains('class="summary-toggle"')) "First-level toggle missing: $position"
+            Assert-True ($section.Contains('class="tc-toggle"')) "Second-level toggle missing: $position"
+        }
+    }
+
+    Invoke-Test 'aggregates_numeric_parent_verdicts' {
+        $context = Get-BuildContext
+        $section = Get-PositionSectionHtml -Html $context.Html -Position 'RR'
+        Assert-True ([regex]::IsMatch($section, 'data-test-name="C104_SBCM_Input_Status_Check_RS4PE"[^>]*data-verdict="Pass"')) 'C104 parent did not aggregate to Pass.'
+        Assert-True ([regex]::IsMatch($section, 'data-test-name="AF_Rear_Fold_Limit_SW_IN"[^>]*data-verdict="Pass"')) 'Child verdict missing.'
+    }
+
+    Invoke-Test 'deduplicates_c104_and_io_control_children' {
+        $context = Get-BuildContext
+        $section = Get-PositionSectionHtml -Html $context.Html -Position 'RR'
+        $summary = [regex]::Match($section, '<div class="functional-summary".*?<!-- FUNCTIONAL_SUMMARY_END -->', [Text.RegularExpressions.RegexOptions]'Singleline').Value
+        Assert-Equal ([regex]::Matches($summary, 'data-test-name="IOCBI_F010"').Count) 1 'IO control child duplicated.'
+        Assert-Equal ([regex]::Matches($summary, 'data-test-name="AF_Rear_Fold_Limit_SW_IN"').Count) 1 'C104 child duplicated.'
+    }
+
+    Invoke-Test 'prefixes_local_identifiers_and_resolves_links' {
+        $context = Get-BuildContext
+        Assert-True ($context.Html.Contains('name="RR__TOP"')) 'RR TOP anchor was not prefixed.'
+        Assert-True (-not $context.Html.Contains('name="TOP"')) 'Unprefixed TOP anchor remains.'
+        Assert-Equal $context.Result.UnresolvedLinkCount 0 'Unresolved fragment links remain.'
+    }
+
+    Invoke-Test 'preserves_external_links' {
+        $context = Get-BuildContext
+        Assert-True ($context.Html.Contains('href="https://example.com/external-doc"')) 'External link was changed.'
+    }
+
+    Invoke-Test 'embeds_complete_test_results_for_each_position' {
+        $context = Get-BuildContext
+        foreach ($report in $context.Reports) {
+            $section = Get-PositionSectionHtml -Html $context.Html -Position $report.Position
+            Assert-True ($section.Contains('<div class="Heading4">Test Results</div>')) "Test Results missing: $($report.Position)"
+            Assert-True ($section.Contains('data-source-record-count="' + $report.TestItems.Count + '"')) "Record count marker missing: $($report.Position)"
+        }
+    }
+
+    Invoke-Test 'matches_source_statistics_and_record_counts' {
+        $context = Get-BuildContext
+        $validation = Test-CombinedReport -Path $context.Path -Reports $context.Reports
+        Assert-Equal $validation.UnresolvedLinkCount 0 'Link validation failed.'
+        foreach ($report in $context.Reports) {
+            $actual = $validation.Positions | Where-Object Position -eq $report.Position | Select-Object -First 1
+            Assert-Equal $actual.RecordCount $report.TestItems.Count "Record mismatch: $($report.Position)"
+            Assert-Equal $actual.Executed $report.Statistics.Executed "Statistics mismatch: $($report.Position)"
+        }
+    }
+
+    Invoke-Test 'rejects_duplicate_ids' {
+        $context = Get-BuildContext
+        $badPath = Join-Path $context.Root 'duplicate-id.html'
+        $badHtml = $context.Html.Replace('</body>', '<div id="position-DRV"></div></body>')
+        [IO.File]::WriteAllText($badPath, $badHtml, [Text.UTF8Encoding]::new($false))
+        Assert-Throws { Test-CombinedReport -Path $badPath -Reports $context.Reports } 'duplicate|Duplicate' 'Duplicate ID was accepted.'
+    }
+
+    Invoke-Test 'keeps_source_hashes_unchanged' {
+        $context = Get-BuildContext
+        foreach ($report in $context.Reports) {
+            $after = (Get-FileHash -LiteralPath $report.Path -Algorithm SHA256).Hash
+            Assert-Equal $after $context.Before[$report.Position] "Source changed: $($report.Position)"
+        }
+    }
+}
+
 if ($script:Failed -gt 0) {
     Write-Output "FAIL: $Group ($($script:Passed) passed, $($script:Failed) failed)"
     exit 1
 }
 
 Write-Output "PASS: $Group ($($script:Passed) tests)"
+
+if ($null -ne $script:BuildContext -and (Test-Path -LiteralPath $script:BuildContext.Root)) {
+    Remove-Item -LiteralPath $script:BuildContext.Root -Recurse -Force -ErrorAction SilentlyContinue
+}
