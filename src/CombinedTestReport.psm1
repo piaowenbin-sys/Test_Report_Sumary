@@ -26,6 +26,19 @@ function Get-StatisticValue {
     return [int]$text
 }
 
+function Get-OutsideStatistics {
+    param([string]$StatisticsHtml)
+    $marker = 'Number of failures outside of test cases'
+    $start = $StatisticsHtml.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase)
+    if ($start -lt 0) { throw 'Outside-test statistics are missing.' }
+    $outsideHtml = $StatisticsHtml.Substring($start)
+    [pscustomobject]@{
+        Inconclusive = Get-StatisticValue -StatisticsHtml $outsideHtml -Label 'Inconclusive'
+        Fail = Get-StatisticValue -StatisticsHtml $outsideHtml -Label 'Fail'
+        Error = Get-StatisticValue -StatisticsHtml $outsideHtml -Label 'Error in test system'
+    }
+}
+
 function Get-TimeValue {
     param([string]$Html, [string]$Label)
     $pattern = '<td\b[^>]*>\s*' + [regex]::Escape($Label) + '\s*</td>\s*<td\b[^>]*>(?<value>.*?)</td>'
@@ -147,6 +160,7 @@ function Get-ReportModel {
     if ($statisticsStart -lt 0 -or $resultsStart -le $statisticsStart) { throw "Statistics/Test Results 영역을 찾지 못했습니다: $resolved" }
     $statisticsHtml = $html.Substring($statisticsStart, $resultsStart - $statisticsStart)
 
+    $outside = Get-OutsideStatistics -StatisticsHtml $statisticsHtml
     [pscustomobject]@{
         Path = $resolved
         FileName = [IO.Path]::GetFileName($resolved)
@@ -162,6 +176,9 @@ function Get-ReportModel {
             Inconclusive = Get-StatisticValue -StatisticsHtml $statisticsHtml -Label 'Test cases inconclusive'
             Fail = Get-StatisticValue -StatisticsHtml $statisticsHtml -Label 'Test cases failed'
             Error = Get-StatisticValue -StatisticsHtml $statisticsHtml -Label 'Test cases with error in test system'
+            OutsideInconclusive = $outside.Inconclusive
+            OutsideFail = $outside.Fail
+            OutsideError = $outside.Error
         }
         TestItems = @(Get-TestResultItems -Html $html)
         SourceHash = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
@@ -243,7 +260,7 @@ function ConvertTo-SummaryItemRows {
             $childButton = '<button type="button" class="tc-toggle" onclick="toggleCombinedReport(''' + $childId + ''', this)">Child TC ' + $descendants.Count + ' - Show details</button>'
         }
         $rows.Add(@"
-<tr data-test-name="$safeName" data-verdict="$($item.EffectiveVerdict)"><td class="DefineCell">$safeNumber</td><td class="DefaultCell"><a href="$safeHref">$safeText</a></td><td class="$cellClass">$($item.EffectiveVerdict)</td><td class="DefaultCell">$childButton</td></tr>
+<tr data-position="$Position" data-test-name="$safeName" data-verdict="$($item.EffectiveVerdict)"><td class="DefineCell">$safeNumber</td><td class="DefaultCell"><a href="$safeHref">$safeText</a></td><td class="$cellClass">$($item.EffectiveVerdict)</td><td class="DefaultCell">$childButton</td></tr>
 "@)
         if ($descendants.Count -gt 0) {
             $childRows = [Collections.Generic.List[string]]::new()
@@ -253,7 +270,7 @@ function ConvertTo-SummaryItemRows {
                 $childName = [Net.WebUtility]::HtmlEncode($child.Text)
                 $childHref = [Net.WebUtility]::HtmlEncode((Get-PrefixedHref -Href $child.Href -Position $Position))
                 $childClass = Get-VerdictCellClass $child.EffectiveVerdict
-                $childRows.Add('<tr data-test-name="' + $childName + '" data-verdict="' + $child.EffectiveVerdict + '"><td class="DefineCell">' + $childNumber + '</td><td class="DefaultCell"><a href="' + $childHref + '">' + $childText + '</a></td><td class="' + $childClass + '">' + $child.EffectiveVerdict + '</td></tr>')
+                $childRows.Add('<tr data-position="' + $Position + '" data-test-name="' + $childName + '" data-verdict="' + $child.EffectiveVerdict + '"><td class="DefineCell">' + $childNumber + '</td><td class="DefaultCell"><a href="' + $childHref + '">' + $childText + '</a></td><td class="' + $childClass + '">' + $child.EffectiveVerdict + '</td></tr>')
             }
             $rows.Add('<tr><td class="DefaultCell" colspan="4"><div id="' + $childId + '" class="tc-details" style="display:none"><table class="OverviewTable nested-table"><tr><td class="DefineCell"><b>Child TC</b></td><td class="DefineCell"><b>Test item</b></td><td class="DefineCell"><b>Verdict</b></td></tr>' + ($childRows -join '') + '</table></div></td></tr>')
         }
@@ -261,7 +278,7 @@ function ConvertTo-SummaryItemRows {
     return ($rows -join '')
 }
 
-function New-FunctionalSummaryHtml {
+function New-PositionSummaryRowsHtml {
     param([object]$Report)
     $groups = @(
         [pscustomobject]@{ Major = 'Diagnostic'; Key = 'C104'; Label = 'C104'; Pattern = $null },
@@ -288,18 +305,42 @@ function New-FunctionalSummaryHtml {
         $fail = @($matched | Where-Object EffectiveVerdict -eq 'Fail').Count
         $na = @($matched | Where-Object EffectiveVerdict -eq 'NA').Count
         $detailsId = $Report.Position + '__functional-summary-details-' + $index
-        $majorCell = if ([string]::IsNullOrWhiteSpace($group.Major)) { '<td class="DefineCell"></td>' } else { '<td class="DefineCell"><b>' + $group.Major + '</b></td>' }
+        $positionCell = if ($index -eq 0) { '<td class="DefineCell position-cell" rowspan="9"><b>' + $Report.Project + ' / ' + $Report.DriveType + ' / ' + $Report.Position + '</b></td>' } else { '' }
+        $areaCell = switch ($index) {
+            0 { '<td class="DefineCell area-cell" rowspan="3"><b>Diagnostic</b></td>' }
+            3 { '<td class="DefineCell area-cell" rowspan="4"><b>Input</b></td>' }
+            7 { '<td class="DefineCell area-cell" rowspan="2"><b>Output</b></td>' }
+            default { '' }
+        }
         $detailRows = ConvertTo-SummaryItemRows -Items $matched -AllItems $Report.TestItems -Position $Report.Position -GroupIndex $index
         $rows.Add(@"
-<tr data-category="$($group.Key)">$majorCell<td class="DefineCell"><b>$($group.Label)</b></td><td class="DefaultCell"><button type="button" class="summary-toggle" onclick="toggleCombinedReport('$detailsId', this)">$($group.Label) ($($matched.Count)) | Pass $pass | Fail $fail | NA $na - Show details</button><div id="$detailsId" class="summary-details" style="display:none"><table class="OverviewTable"><tr><td class="DefineCell"><b>TC</b></td><td class="DefineCell"><b>Test item</b></td><td class="DefineCell"><b>Verdict</b></td><td class="DefineCell"><b>Children</b></td></tr>$detailRows</table></div></td></tr>
+<tr data-category="$($group.Key)">$positionCell$areaCell<td class="DefineCell"><b>$($group.Label)</b></td><td class="DefaultCell"><button type="button" class="summary-toggle" onclick="toggleCombinedReport('$detailsId', this)">$($group.Label) ($($matched.Count)) | Pass $pass | Fail $fail | NA $na - Show details</button><div id="$detailsId" class="summary-details" style="display:none"><table class="OverviewTable"><tr><td class="DefineCell"><b>TC</b></td><td class="DefineCell"><b>Test item</b></td><td class="DefineCell"><b>Verdict</b></td><td class="DefineCell"><b>Children</b></td></tr>$detailRows</table></div></td></tr>
 "@)
     }
-    return '<div class="functional-summary" data-position="' + $Report.Position + '"><div class="Heading4">Functional Test Summary</div><div class="Indentation"><table class="OverviewTable"><tr><td class="DefineCell"><b>Area</b></td><td class="DefineCell"><b>Category</b></td><td class="DefineCell"><b>Results and details</b></td></tr>' + ($rows -join '') + '</table></div></div><!-- FUNCTIONAL_SUMMARY_END -->'
+    return '<tbody data-summary-position="' + $Report.Position + '">' + ($rows -join '') + '</tbody>'
+}
+
+function New-CombinedFunctionalSummaryHtml {
+    param([object[]]$Reports)
+    $positionBodies = @($Reports | ForEach-Object { New-PositionSummaryRowsHtml -Report $_ })
+    return '<div class="combined-functional-summary"><div class="Heading4">Integrated Functional Test Summary</div><div class="Indentation"><table class="OverviewTable combined-summary-table"><thead><tr><td class="DefineCell"><b>Position</b></td><td class="DefineCell"><b>Area</b></td><td class="DefineCell"><b>Category</b></td><td class="DefineCell"><b>Results and details</b></td></tr></thead>' + ($positionBodies -join '') + '</table></div></div><!-- COMBINED_FUNCTIONAL_SUMMARY_END -->'
+}
+
+function ConvertTo-PositionIdentifier {
+    param([string]$Value, [string]$Position)
+    $scoped = [regex]::Match($Value, '^(?<scope>s\d+\.)(?<prefix>tbl2_|tbl_|lnk_|div_)(?<rest>.*)$', [Text.RegularExpressions.RegexOptions]'IgnoreCase')
+    if ($scoped.Success) {
+        return $scoped.Groups['scope'].Value + $scoped.Groups['prefix'].Value + $Position + '__' + $scoped.Groups['rest'].Value
+    }
+    $known = [regex]::Match($Value, '^(?<prefix>tbl2_|tbl_|lnk_|div_)(?<rest>.*)$', [Text.RegularExpressions.RegexOptions]'IgnoreCase')
+    if ($known.Success) { return $known.Groups['prefix'].Value + $Position + '__' + $known.Groups['rest'].Value }
+    return $Position + '__' + $Value
 }
 
 function ConvertTo-PrefixedBody {
     param([string]$BodyHtml, [string]$Position)
     $seen = @{}
+    $canonical = @{}
     $identifierPattern = '(?<![\w:-])(?<attr>(?:id|name))\s*=\s*(?<quote>["''])(?<value>.*?)(?:\k<quote>)'
     $converted = [regex]::Replace($BodyHtml, $identifierPattern, {
         param($match)
@@ -308,19 +349,36 @@ function ConvertTo-PrefixedBody {
         $key = $attr + '|' + $value
         if ($seen.ContainsKey($key)) { $seen[$key]++ } else { $seen[$key] = 1 }
         $suffix = if ($seen[$key] -gt 1) { '__dup' + $seen[$key] } else { '' }
-        $match.Groups['attr'].Value + '=' + $match.Groups['quote'].Value + $Position + '__' + $value + $suffix + $match.Groups['quote'].Value
+        $newValue = (ConvertTo-PositionIdentifier -Value $value -Position $Position) + $suffix
+        if (-not $canonical.ContainsKey($value)) { $canonical[$value] = $newValue }
+        $match.Groups['attr'].Value + '=' + $match.Groups['quote'].Value + $newValue + $match.Groups['quote'].Value
     }, [Text.RegularExpressions.RegexOptions]'IgnoreCase')
     $hrefPattern = '(?<attr>\bhref)\s*=\s*(?<quote>["''])#(?<value>.*?)(?:\k<quote>)'
-    return [regex]::Replace($converted, $hrefPattern, {
+    $converted = [regex]::Replace($converted, $hrefPattern, {
         param($match)
-        $match.Groups['attr'].Value + '=' + $match.Groups['quote'].Value + '#' + $Position + '__' + $match.Groups['value'].Value + $match.Groups['quote'].Value
+        $value = $match.Groups['value'].Value
+        $target = if ($canonical.ContainsKey($value)) { $canonical[$value] } else { ConvertTo-PositionIdentifier -Value $value -Position $Position }
+        $match.Groups['attr'].Value + '=' + $match.Groups['quote'].Value + '#' + $target + $match.Groups['quote'].Value
+    }, [Text.RegularExpressions.RegexOptions]'IgnoreCase')
+    $callPattern = '(?<function>showTC|switchAll|showTable|hideTable|switchTable)\(\s*(?<quote>["''])(?<argument>.*?)(?:\k<quote>)'
+    $converted = [regex]::Replace($converted, $callPattern, {
+        param($match)
+        $match.Groups['function'].Value + '(' + $match.Groups['quote'].Value + $Position + '__' + $match.Groups['argument'].Value + $match.Groups['quote'].Value
+    }, [Text.RegularExpressions.RegexOptions]'IgnoreCase')
+    $documentAllPattern = 'document\.all\[(?<quote>["''])(?<identifier>.*?)(?:\k<quote>)\]'
+    return [regex]::Replace($converted, $documentAllPattern, {
+        param($match)
+        $value = $match.Groups['identifier'].Value
+        $target = if ($canonical.ContainsKey($value)) { $canonical[$value] } else { ConvertTo-PositionIdentifier -Value $value -Position $Position }
+        'document.all[' + $match.Groups['quote'].Value + $target + $match.Groups['quote'].Value + ']'
     }, [Text.RegularExpressions.RegexOptions]'IgnoreCase')
 }
 
 function Get-PositionVerdict {
     param([object]$Statistics)
-    if ($Statistics.Fail -gt 0 -or $Statistics.Error -gt 0) { return 'Fail' }
-    if ($Statistics.Executed -gt 0 -and $Statistics.Pass -eq $Statistics.Executed -and $Statistics.Inconclusive -eq 0) { return 'Pass' }
+    if ($Statistics.Fail -gt 0 -or $Statistics.Error -gt 0 -or $Statistics.OutsideFail -gt 0 -or $Statistics.OutsideError -gt 0) { return 'Fail' }
+    if ($Statistics.Inconclusive -gt 0 -or $Statistics.OutsideInconclusive -gt 0) { return 'NA' }
+    if ($Statistics.Executed -gt 0 -and $Statistics.Pass -eq $Statistics.Executed) { return 'Pass' }
     return 'NA'
 }
 
@@ -329,26 +387,24 @@ function New-CombinedOverviewHtml {
     $rows = foreach ($report in $Reports) {
         $verdict = Get-PositionVerdict $report.Statistics
         $class = Get-VerdictCellClass $verdict
-        '<tr><td class="DefineCell"><a href="#position-' + $report.Position + '">' + $report.Position + '</a></td><td class="DefaultCell">' + [Net.WebUtility]::HtmlEncode($report.TestBegin) + '</td><td class="DefaultCell">' + [Net.WebUtility]::HtmlEncode($report.TestEnd) + '</td><td class="NumberCell">' + $report.Statistics.Executed + '</td><td class="NumberCellPositiveResult">' + $report.Statistics.Pass + '</td><td class="NumberCell">' + $report.Statistics.Fail + '</td><td class="NumberCell">' + $report.Statistics.Inconclusive + '</td><td class="NumberCell">' + $report.Statistics.Error + '</td><td class="' + $class + '">' + $verdict + '</td></tr>'
+        '<tr data-overview-position="' + $report.Position + '"><td class="DefineCell"><a href="#position-' + $report.Position + '">' + $report.Position + '</a></td><td class="DefaultCell">' + [Net.WebUtility]::HtmlEncode($report.TestBegin) + '</td><td class="DefaultCell">' + [Net.WebUtility]::HtmlEncode($report.TestEnd) + '</td><td class="NumberCell">' + $report.Statistics.Executed + '</td><td class="NumberCellPositiveResult">' + $report.Statistics.Pass + '</td><td class="NumberCell">' + $report.Statistics.Fail + '</td><td class="NumberCell">' + $report.Statistics.Inconclusive + '</td><td class="NumberCell">' + $report.Statistics.Error + '</td><td class="NumberCell">' + $report.Statistics.OutsideInconclusive + '</td><td class="NumberCell">' + $report.Statistics.OutsideFail + '</td><td class="NumberCell">' + $report.Statistics.OutsideError + '</td><td class="' + $class + '">' + $verdict + '</td></tr>'
     }
     return @"
 <div id="combined-overview" class="combined-overview">
 <h1>RS4PE / LHD / DRV &middot; AST &middot; RL &middot; RR</h1>
 <table class="OverviewTable metadata-table"><tr><td class="DefineCell">Project</td><td>RS4PE</td><td class="DefineCell">Drive Type</td><td>LHD</td></tr><tr><td class="DefineCell">Positions</td><td>DRV / AST / RL / RR</td><td class="DefineCell">EOL Variant</td><td>All_DTC_List (defined in test design)</td></tr></table>
 <div class="position-navigation"><a href="#position-DRV">DRV</a><a href="#position-AST">AST</a><a href="#position-RL">RL</a><a href="#position-RR">RR</a></div>
-<h2>Position Result Overview</h2><table class="OverviewTable"><tr><td class="DefineCell">Position</td><td class="DefineCell">Begin</td><td class="DefineCell">End</td><td class="DefineCell">Executed</td><td class="DefineCell">Pass</td><td class="DefineCell">Fail</td><td class="DefineCell">Inconclusive</td><td class="DefineCell">Error</td><td class="DefineCell">Verdict</td></tr>$($rows -join '')</table>
+<h2>Position Result Overview</h2><table class="OverviewTable"><tr><td class="DefineCell">Position</td><td class="DefineCell">Begin</td><td class="DefineCell">End</td><td class="DefineCell">Executed</td><td class="DefineCell">Pass</td><td class="DefineCell">Fail</td><td class="DefineCell">Inconclusive</td><td class="DefineCell">Error</td><td class="DefineCell">Outside Inconclusive</td><td class="DefineCell">Outside Fail</td><td class="DefineCell">Outside Error</td><td class="DefineCell">Verdict</td></tr>$($rows -join '')</table>
 </div>
 "@
 }
 
 function New-PositionSectionHtml {
     param([object]$Report)
-    $summary = New-FunctionalSummaryHtml -Report $Report
     $body = ConvertTo-PrefixedBody -BodyHtml $Report.BodyHtml -Position $Report.Position
     return @"
-<section id="position-$($Report.Position)" class="position-report" data-position="$($Report.Position)" data-source-file="$([Net.WebUtility]::HtmlEncode($Report.FileName))" data-source-record-count="$($Report.TestItems.Count)" data-executed="$($Report.Statistics.Executed)" data-pass="$($Report.Statistics.Pass)" data-fail="$($Report.Statistics.Fail)" data-inconclusive="$($Report.Statistics.Inconclusive)" data-error="$($Report.Statistics.Error)">
+<section id="position-$($Report.Position)" class="position-report" data-position="$($Report.Position)" data-source-file="$([Net.WebUtility]::HtmlEncode($Report.FileName))" data-source-record-count="$($Report.TestItems.Count)" data-executed="$($Report.Statistics.Executed)" data-pass="$($Report.Statistics.Pass)" data-fail="$($Report.Statistics.Fail)" data-inconclusive="$($Report.Statistics.Inconclusive)" data-error="$($Report.Statistics.Error)" data-outside-inconclusive="$($Report.Statistics.OutsideInconclusive)" data-outside-fail="$($Report.Statistics.OutsideFail)" data-outside-error="$($Report.Statistics.OutsideError)">
 <div class="position-banner"><h2>$($Report.Project) / $($Report.DriveType) / $($Report.Position)</h2><a href="#combined-overview">Back to overview</a></div>
-$summary
 <!-- ORIGINAL_REPORT_$($Report.Position)_BEGIN -->$body<!-- ORIGINAL_REPORT_$($Report.Position)_END -->
 <div class="position-footer"><a href="#combined-overview">Back to overview</a></div>
 </section><!-- POSITION_$($Report.Position)_END -->
@@ -415,6 +471,9 @@ function Test-CombinedReport {
             'data-fail' = $report.Statistics.Fail
             'data-inconclusive' = $report.Statistics.Inconclusive
             'data-error' = $report.Statistics.Error
+            'data-outside-inconclusive' = $report.Statistics.OutsideInconclusive
+            'data-outside-fail' = $report.Statistics.OutsideFail
+            'data-outside-error' = $report.Statistics.OutsideError
         }
         foreach ($key in $expectedAttributes.Keys) {
             if ($section -notmatch ([regex]::Escape($key + '="' + $expectedAttributes[$key] + '"'))) { throw "Displayed statistics mismatch: $($report.Position)/$key" }
@@ -435,21 +494,35 @@ function New-CombinedReport {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object[]]$Reports, [Parameter(Mandatory = $true)][string]$OutputPath)
     $ordered = @(Assert-ReportSet -Reports $Reports)
-    $parent = Split-Path -Parent $OutputPath
+    $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
+    foreach ($report in $ordered) {
+        if ([StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($report.Path), $outputFullPath)) {
+            throw "OutputPath must not match a source report: $($report.FileName)"
+        }
+    }
+    $parent = Split-Path -Parent $outputFullPath
     if (-not [string]::IsNullOrWhiteSpace($parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     $sourceHead = [regex]::Replace($ordered[0].HeadHtml, '(?is)<title\b[^>]*>.*?</title\s*>', '')
     $overview = New-CombinedOverviewHtml -Reports $ordered
+    $functionalSummary = New-CombinedFunctionalSummaryHtml -Reports $ordered
     $sections = @($ordered | ForEach-Object { New-PositionSectionHtml -Report $_ })
     $html = @"
 <!DOCTYPE html><html><head><meta charset="utf-8"><title>RS4PE LHD Combined Test Report</title>$sourceHead
 <style>
-html{scroll-behavior:smooth} body{margin:0;background:#f4f7fb;color:#172b4d}.combined-overview,.position-report{max-width:1500px;margin:18px auto;padding:22px;background:#fff;border:1px solid #b8c8dd;border-radius:8px;box-shadow:0 2px 8px rgba(28,69,120,.12)}.combined-overview h1,.position-banner h2{color:#0b4f9c}.position-navigation{display:flex;gap:10px;margin:18px 0}.position-navigation a,.position-banner a,.position-footer a{background:#1769aa;color:#fff!important;padding:8px 16px;border-radius:5px;text-decoration:none}.position-banner{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #1769aa;margin-bottom:15px}.summary-toggle,.tc-toggle{cursor:pointer;border:1px solid #6689b8;background:#eaf2ff;color:#173b6c;border-radius:4px;padding:4px 9px}.nested-table{width:calc(100% - 24px)!important;margin:6px 0 6px 24px}.position-footer{margin-top:24px;padding-top:12px;border-top:1px solid #b8c8dd}.metadata-table{margin-bottom:12px}
+html{scroll-behavior:smooth} body{margin:0;background:#f4f7fb;color:#172b4d}.combined-overview,.combined-functional-summary,.position-report{max-width:1500px;margin:18px auto;padding:22px;background:#fff;border:1px solid #b8c8dd;border-radius:8px;box-shadow:0 2px 8px rgba(28,69,120,.12)}.combined-overview h1,.position-banner h2{color:#0b4f9c}.position-navigation{display:flex;gap:10px;margin:18px 0}.position-navigation a,.position-banner a,.position-footer a{background:#1769aa;color:#fff!important;padding:8px 16px;border-radius:5px;text-decoration:none}.position-banner{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #1769aa;margin-bottom:15px}.summary-toggle,.tc-toggle{cursor:pointer;border:1px solid #6689b8;background:#eaf2ff;color:#173b6c;border-radius:4px;padding:4px 9px}.nested-table{width:calc(100% - 24px)!important;margin:6px 0 6px 24px}.position-footer{margin-top:24px;padding-top:12px;border-top:1px solid #b8c8dd}.metadata-table{margin-bottom:12px}.combined-summary-table{width:100%}.position-cell,.area-cell{vertical-align:top}.combined-functional-summary .Heading4{font-size:1.35em;color:#0b4f9c;margin-bottom:12px}
 </style>
 <script>function toggleCombinedReport(id,button){var node=document.getElementById(id);if(!node){return;}var open=node.style.display==='none';node.style.display=open?'block':'none';button.setAttribute('aria-expanded',open?'true':'false');}</script>
-</head><body>$overview$($sections -join '')</body></html>
+</head><body>$overview$functionalSummary$($sections -join '')</body></html>
 "@
-    [IO.File]::WriteAllText($OutputPath, $html, [Text.UTF8Encoding]::new($false))
-    return Test-CombinedReport -Path $OutputPath -Reports $ordered
+    $tempPath = Join-Path $parent ('.combined-build-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($tempPath, $html, [Text.UTF8Encoding]::new($false))
+        Test-CombinedReport -Path $tempPath -Reports $ordered | Out-Null
+        Move-Item -LiteralPath $tempPath -Destination $outputFullPath -Force
+        return Test-CombinedReport -Path $outputFullPath -Reports $ordered
+    } finally {
+        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Publish-VerifiedReport {

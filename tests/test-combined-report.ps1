@@ -46,6 +46,14 @@ function New-MinimalReportHtml {
         [string]$DriveType = 'LHD',
         [string]$EolVariant = 'All_DTC_List (defined in test design)',
         [string]$Rows = '',
+        [int]$Executed = 2,
+        [int]$Passed = 1,
+        [int]$Failed = 1,
+        [int]$Inconclusive = 0,
+        [int]$ErrorCount = 0,
+        [int]$OutsideInconclusive = 0,
+        [int]$OutsideFail = 0,
+        [int]$OutsideError = 0,
         [switch]$Malformed
     )
     $closing = if ($Malformed) { '' } else { '</body></html>' }
@@ -55,9 +63,13 @@ function New-MinimalReportHtml {
 <div class="Heading2">Test Overview</div>
 <table class="DefaultTable"><tr><td>Test begin: </td><td>2026-10-08 11:02:02</td></tr><tr><td>Test end: </td><td>2026-10-08 11:09:19</td></tr></table>
 <div class="Heading4">Statistics</div><table class="OverviewTable">
-<tr><td>Executed test cases </td><td>2</td></tr><tr><td>Test cases passed </td><td>1</td></tr>
-<tr><td>Test cases inconclusive</td><td>0</td></tr><tr><td>Test cases failed </td><td>1</td></tr>
-<tr><td>Test cases with error in test system </td><td>0</td></tr></table>
+<tr><td>Executed test cases </td><td>$Executed</td></tr><tr><td>Test cases passed </td><td>$Passed</td></tr>
+<tr><td>Test cases inconclusive</td><td>$Inconclusive</td></tr><tr><td>Test cases failed </td><td>$Failed</td></tr>
+<tr><td>Test cases with error in test system </td><td>$ErrorCount</td></tr>
+<tr><td>Number of failures outside of test cases</td><td></td></tr>
+<tr><td style="text-indent: 20px;">Inconclusive</td><td>$OutsideInconclusive</td></tr>
+<tr><td style="text-indent: 20px;">Fail</td><td>$OutsideFail</td></tr>
+<tr><td style="text-indent: 20px;">Error in test system</td><td>$OutsideError</td></tr></table>
 <div class="Heading4">Test Results</div><table class="OverviewTable">$Rows</table>
 <a name="TestModuleInfo"></a>
 <div class="Heading4">Variant Properties</div><table>
@@ -66,6 +78,26 @@ function New-MinimalReportHtml {
 <a name="parent-one"></a><a name="child-one"></a><a name="parent-ten"></a><a name="child-ten"></a>
 $closing
 "@
+}
+
+function New-MinimalReportSet {
+    param([string]$Directory, [string]$OutsideFailPosition = '')
+    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+    $rows = '<tr><td>1</td><td><a href="#parent-one">Minimal_Test</a></td><td class="PositiveResultCell">pass</td></tr>'
+    $names = @{
+        DRV = '2026-10-08_08-18-49_RS4_Test_Report.html'
+        AST = '2026-10-08_10-16-56_RS4_Test_Report.html'
+        RL = '2026-10-08_10-42-10_RS4_Test_Report.html'
+        RR = '2026-10-08_11-01-20_RS4_Test_Report.html'
+    }
+    $reports = foreach ($position in @('DRV', 'AST', 'RL', 'RR')) {
+        $outsideFail = if ($position -eq $OutsideFailPosition) { 1 } else { 0 }
+        $path = Join-Path $Directory $names[$position]
+        $html = New-MinimalReportHtml -Position $position -Rows $rows -Executed 2 -Passed 2 -Failed 0 -OutsideFail $outsideFail
+        [IO.File]::WriteAllText($path, $html, [Text.UTF8Encoding]::new($false))
+        Get-ReportModel -Path $path
+    }
+    return @(Assert-ReportSet -Reports @($reports))
 }
 
 function New-ReportStub {
@@ -107,6 +139,13 @@ function Get-PositionSectionHtml {
     return $match.Value
 }
 
+function Get-CombinedSummaryHtml {
+    param([string]$Html)
+    $match = [regex]::Match($Html, '<div class="combined-functional-summary".*?<!-- COMBINED_FUNCTIONAL_SUMMARY_END -->', [Text.RegularExpressions.RegexOptions]'IgnoreCase,Singleline')
+    if (-not $match.Success) { throw 'Combined functional summary missing.' }
+    return $match.Value
+}
+
 $modulePath = Join-Path $PSScriptRoot '..\src\CombinedTestReport.psm1'
 Import-Module $modulePath -Force
 
@@ -123,6 +162,9 @@ if ($Group -in @('Parse', 'All')) {
         Assert-Equal $report.Statistics.Inconclusive 0 'Inconclusive 통계 오류'
         Assert-Equal $report.Statistics.Fail 0 'Fail 통계 오류'
         Assert-Equal $report.Statistics.Error 0 'Error 통계 오류'
+        Assert-Equal $report.Statistics.OutsideInconclusive 0 'Outside Inconclusive 통계 오류'
+        Assert-Equal $report.Statistics.OutsideFail 0 'Outside Fail 통계 오류'
+        Assert-Equal $report.Statistics.OutsideError 0 'Outside Error 통계 오류'
         Assert-True ($report.TestItems.Count -gt 0) 'Test Results 항목이 없습니다.'
         Assert-True (-not [string]::IsNullOrWhiteSpace($report.SourceHash)) '원본 해시가 없습니다.'
     }
@@ -181,32 +223,44 @@ if ($Group -in @('Build', 'All')) {
         }
     }
 
-    Invoke-Test 'includes_nine_nested_summary_categories_per_position' {
+    Invoke-Test 'integrates_all_position_summaries_at_top' {
         $context = Get-BuildContext
+        $summary = Get-CombinedSummaryHtml -Html $context.Html
         $categories = @('C104', 'ForceControl', 'ECU_ID', 'PWM', 'Switch', 'Sensor', 'Vbat', 'HS', 'Motor')
         foreach ($position in @('DRV', 'AST', 'RL', 'RR')) {
-            $section = Get-PositionSectionHtml -Html $context.Html -Position $position
+            $positionBlock = [regex]::Match($summary, '<tbody\b[^>]*data-summary-position="' + $position + '"[^>]*>.*?</tbody>', [Text.RegularExpressions.RegexOptions]'IgnoreCase,Singleline').Value
+            Assert-True (-not [string]::IsNullOrWhiteSpace($positionBlock)) "Integrated position summary missing: $position"
+            Assert-True ($positionBlock.Contains('rowspan="9"') -and $positionBlock.Contains('RS4PE / LHD / ' + $position)) "Position hierarchy missing: $position"
             foreach ($category in $categories) {
-                Assert-Equal ([regex]::Matches($section, 'data-category="' + [regex]::Escape($category) + '"').Count) 1 "Category count error: $position/$category"
+                Assert-Equal ([regex]::Matches($positionBlock, 'data-category="' + [regex]::Escape($category) + '"').Count) 1 "Category count error: $position/$category"
             }
-            Assert-True ($section.Contains('class="summary-toggle"')) "First-level toggle missing: $position"
-            Assert-True ($section.Contains('class="tc-toggle"')) "Second-level toggle missing: $position"
+            Assert-True ($positionBlock.Contains('class="summary-toggle"')) "First-level toggle missing: $position"
+            Assert-True ($positionBlock.Contains('class="tc-toggle"')) "Second-level toggle missing: $position"
+        }
+        Assert-Equal ([regex]::Matches($summary, 'data-category=').Count) 36 'Integrated category total is not 36.'
+    }
+
+    Invoke-Test 'removes_functional_summary_from_position_sections' {
+        $context = Get-BuildContext
+        foreach ($position in @('DRV', 'AST', 'RL', 'RR')) {
+            $section = Get-PositionSectionHtml -Html $context.Html -Position $position
+            Assert-True (-not $section.Contains('functional-summary')) "Position summary still present: $position"
         }
     }
 
     Invoke-Test 'aggregates_numeric_parent_verdicts' {
         $context = Get-BuildContext
-        $section = Get-PositionSectionHtml -Html $context.Html -Position 'RR'
-        Assert-True ([regex]::IsMatch($section, 'data-test-name="C104_SBCM_Input_Status_Check_RS4PE"[^>]*data-verdict="Pass"')) 'C104 parent did not aggregate to Pass.'
-        Assert-True ([regex]::IsMatch($section, 'data-test-name="AF_Rear_Fold_Limit_SW_IN"[^>]*data-verdict="Pass"')) 'Child verdict missing.'
+        $summary = Get-CombinedSummaryHtml -Html $context.Html
+        Assert-True ([regex]::IsMatch($summary, 'data-position="RR"[^>]*data-test-name="C104_SBCM_Input_Status_Check_RS4PE"[^>]*data-verdict="Pass"')) 'C104 parent did not aggregate to Pass.'
+        Assert-True ([regex]::IsMatch($summary, 'data-position="RR"[^>]*data-test-name="AF_Rear_Fold_Limit_SW_IN"[^>]*data-verdict="Pass"')) 'Child verdict missing.'
     }
 
     Invoke-Test 'deduplicates_c104_and_io_control_children' {
         $context = Get-BuildContext
-        $section = Get-PositionSectionHtml -Html $context.Html -Position 'RR'
-        $summary = [regex]::Match($section, '<div class="functional-summary".*?<!-- FUNCTIONAL_SUMMARY_END -->', [Text.RegularExpressions.RegexOptions]'Singleline').Value
-        Assert-Equal ([regex]::Matches($summary, 'data-test-name="IOCBI_F010"').Count) 1 'IO control child duplicated.'
-        Assert-Equal ([regex]::Matches($summary, 'data-test-name="AF_Rear_Fold_Limit_SW_IN"').Count) 1 'C104 child duplicated.'
+        $summary = Get-CombinedSummaryHtml -Html $context.Html
+        $rr = [regex]::Match($summary, '<tbody\b[^>]*data-summary-position="RR"[^>]*>.*?</tbody>', [Text.RegularExpressions.RegexOptions]'IgnoreCase,Singleline').Value
+        Assert-Equal ([regex]::Matches($rr, 'data-test-name="IOCBI_F010"').Count) 1 'IO control child duplicated.'
+        Assert-Equal ([regex]::Matches($rr, 'data-test-name="AF_Rear_Fold_Limit_SW_IN"').Count) 1 'C104 child duplicated.'
     }
 
     Invoke-Test 'prefixes_local_identifiers_and_resolves_links' {
@@ -219,6 +273,44 @@ if ($Group -in @('Build', 'All')) {
     Invoke-Test 'preserves_external_links' {
         $context = Get-BuildContext
         Assert-True ($context.Html.Contains('href="https://example.com/external-doc"')) 'External link was changed.'
+    }
+
+    Invoke-Test 'rewrites_original_javascript_id_references' {
+        $context = Get-BuildContext
+        foreach ($position in @('DRV', 'AST', 'RL', 'RR')) {
+            $section = Get-PositionSectionHtml -Html $context.Html -Position $position
+            Assert-True ($section.Contains('id="lnk_' + $position + '__1"')) "Prefixed link ID missing: $position"
+            Assert-True ($section.Contains("switchAll('$position" + "__1',document.all['lnk_$position" + "__1'].text)")) "switchAll reference mismatch: $position"
+            $report = @($context.Reports | Where-Object Position -eq $position)[0]
+            if ($report.BodyHtml -match 'onclick\s*=\s*["'']showTC\(') {
+                $showPattern = 'onclick="showTC\(''{0}__[^'']+''\)"' -f $position
+                Assert-True ([regex]::IsMatch($section, $showPattern)) "showTC reference mismatch: $position"
+            }
+        }
+    }
+
+    Invoke-Test 'outside_failure_prevents_pass_verdict' {
+        $root = Join-Path ([IO.Path]::GetTempPath()) ('combined-report-outside-' + [guid]::NewGuid().ToString('N'))
+        try {
+            $reports = @(New-MinimalReportSet -Directory $root -OutsideFailPosition 'DRV')
+            Assert-Equal $reports[0].Statistics.OutsideFail 1 'Outside Fail was not parsed.'
+            $output = Join-Path $root 'combined.html'
+            New-CombinedReport -Reports $reports -OutputPath $output | Out-Null
+            $html = [IO.File]::ReadAllText($output, [Text.Encoding]::UTF8)
+            Assert-True ([regex]::IsMatch($html, '<tr[^>]*data-overview-position="DRV"[^>]*>.*?<td class="NegativeResultCell">Fail</td>', [Text.RegularExpressions.RegexOptions]'Singleline')) 'Outside Fail did not make DRV verdict Fail.'
+        } finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Invoke-Test 'refuses_output_path_that_matches_source' {
+        $root = Join-Path ([IO.Path]::GetTempPath()) ('combined-report-collision-' + [guid]::NewGuid().ToString('N'))
+        try {
+            $reports = @(New-MinimalReportSet -Directory $root)
+            $sourcePath = $reports[0].Path
+            $before = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+            Assert-Throws { New-CombinedReport -Reports $reports -OutputPath $sourcePath } 'source|input|evidence|same' 'Source/output collision was accepted.'
+            $after = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+            Assert-Equal $after $before 'Source was modified before collision rejection.'
+        } finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
     Invoke-Test 'embeds_complete_test_results_for_each_position' {
