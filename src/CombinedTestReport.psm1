@@ -452,4 +452,42 @@ html{scroll-behavior:smooth} body{margin:0;background:#f4f7fb;color:#172b4d}.com
     return Test-CombinedReport -Path $OutputPath -Reports $ordered
 }
 
-Export-ModuleMember -Function Get-ReportModel, Assert-ReportSet, New-CombinedReport, Test-CombinedReport
+function Publish-VerifiedReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$PublishPath
+    )
+    $source = (Resolve-Path -LiteralPath $SourcePath).Path
+    $publishFullPath = [IO.Path]::GetFullPath($PublishPath)
+    if ($source -eq $publishFullPath) { throw 'SourcePath and PublishPath must be different.' }
+    $publishDirectory = Split-Path -Parent $publishFullPath
+    if (-not (Test-Path -LiteralPath $publishDirectory)) { New-Item -ItemType Directory -Path $publishDirectory -Force | Out-Null }
+
+    $tempPath = Join-Path $publishDirectory ('.combined-report-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $backupPath = $null
+    try {
+        Copy-Item -LiteralPath $source -Destination $tempPath
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $tempHash = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256).Hash
+        if ($sourceHash -ne $tempHash) { throw 'Staged publish file hash mismatch.' }
+        if (Test-Path -LiteralPath $publishFullPath) {
+            $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+            $backupPath = $publishFullPath + '.bak_' + $stamp
+            $counter = 1
+            while (Test-Path -LiteralPath $backupPath) {
+                $backupPath = $publishFullPath + '.bak_' + $stamp + '_' + $counter
+                $counter++
+            }
+            Copy-Item -LiteralPath $publishFullPath -Destination $backupPath
+        }
+        Copy-Item -LiteralPath $tempPath -Destination $publishFullPath -Force
+        $publishedHash = (Get-FileHash -LiteralPath $publishFullPath -Algorithm SHA256).Hash
+        if ($publishedHash -ne $sourceHash) { throw 'Published file hash mismatch.' }
+        [pscustomobject]@{ SourcePath = $source; PublishPath = $publishFullPath; BackupPath = $backupPath; Hash = $publishedHash }
+    } finally {
+        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Export-ModuleMember -Function Get-ReportModel, Assert-ReportSet, New-CombinedReport, Test-CombinedReport, Publish-VerifiedReport

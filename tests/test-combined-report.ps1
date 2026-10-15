@@ -258,6 +258,62 @@ if ($Group -in @('Build', 'All')) {
     }
 }
 
+if ($Group -in @('Publish', 'All')) {
+    $script:PublishRoot = Join-Path ([IO.Path]::GetTempPath()) ('combined-report-publish-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $script:PublishRoot -Force | Out-Null
+    $commandPath = Join-Path $PSScriptRoot '..\combine-test-reports.ps1'
+
+    Invoke-Test 'command_builds_verified_workspace_artifact' {
+        Assert-True (Test-Path -LiteralPath $commandPath) 'Command script does not exist.'
+        $output = Join-Path $script:PublishRoot 'workspace\combined.html'
+        & $commandPath -InputDirectory 'C:\Users\USER.K1109684\Downloads\TestReport' -OutputPath $output | Out-Null
+        Assert-True (Test-Path -LiteralPath $output) 'Workspace artifact was not created.'
+        $reports = @(Get-RealReportSet)
+        $validation = Test-CombinedReport -Path $output -Reports $reports
+        Assert-Equal $validation.Positions.Count 4 'Verified position count is not four.'
+    }
+
+    Invoke-Test 'publish_creates_timestamped_backup_before_replace' {
+        $source = Join-Path $script:PublishRoot 'source-one.html'
+        $destination = Join-Path $script:PublishRoot 'published\report.html'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        [IO.File]::WriteAllText($source, 'new-content-one', [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($destination, 'old-content', [Text.UTF8Encoding]::new($false))
+        $publish = Publish-VerifiedReport -SourcePath $source -PublishPath $destination
+        Assert-True (Test-Path -LiteralPath $publish.BackupPath) 'Backup was not created.'
+        Assert-True ($publish.BackupPath -match '\.bak_\d{8}_\d{6}_\d{3}') 'Backup name has no timestamp.'
+        Assert-Equal ([IO.File]::ReadAllText($publish.BackupPath)) 'old-content' 'Backup content changed.'
+        Assert-Equal ([IO.File]::ReadAllText($destination)) 'new-content-one' 'Published content mismatch.'
+    }
+
+    Invoke-Test 'second_publish_does_not_overwrite_previous_backup' {
+        $source = Join-Path $script:PublishRoot 'source-two.html'
+        $destination = Join-Path $script:PublishRoot 'published\report.html'
+        $before = @(Get-ChildItem -LiteralPath (Split-Path -Parent $destination) -Filter 'report.html.bak_*' -File)
+        [IO.File]::WriteAllText($source, 'new-content-two', [Text.UTF8Encoding]::new($false))
+        $publish = Publish-VerifiedReport -SourcePath $source -PublishPath $destination
+        $after = @(Get-ChildItem -LiteralPath (Split-Path -Parent $destination) -Filter 'report.html.bak_*' -File)
+        Assert-Equal $after.Count ($before.Count + 1) 'Second backup was not preserved separately.'
+        Assert-True (Test-Path -LiteralPath $publish.BackupPath) 'Second backup path is missing.'
+        Assert-Equal ([IO.File]::ReadAllText($publish.BackupPath)) 'new-content-one' 'Second backup did not preserve previous report.'
+        Assert-Equal ([IO.File]::ReadAllText($destination)) 'new-content-two' 'Second publish content mismatch.'
+    }
+
+    Invoke-Test 'publication_stops_when_validation_fails' {
+        Assert-True (Test-Path -LiteralPath $commandPath) 'Command script does not exist.'
+        $input = Join-Path $script:PublishRoot 'incomplete-input'
+        New-Item -ItemType Directory -Path $input -Force | Out-Null
+        foreach ($name in @('2026-10-08_08-18-49_RS4_Test_Report.html', '2026-10-08_10-16-56_RS4_Test_Report.html', '2026-10-08_10-42-10_RS4_Test_Report.html')) {
+            [IO.File]::WriteAllText((Join-Path $input $name), '<html></html>', [Text.UTF8Encoding]::new($false))
+        }
+        $output = Join-Path $script:PublishRoot 'invalid-output.html'
+        $publish = Join-Path $script:PublishRoot 'invalid-published.html'
+        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $commandPath, '-InputDirectory', $input, '-OutputPath', $output, '-PublishPath', $publish) -Wait -PassThru -WindowStyle Hidden
+        Assert-True ($process.ExitCode -ne 0) 'Invalid source set returned success.'
+        Assert-True (-not (Test-Path -LiteralPath $publish)) 'Invalid report was published.'
+    }
+}
+
 if ($script:Failed -gt 0) {
     Write-Output "FAIL: $Group ($($script:Passed) passed, $($script:Failed) failed)"
     exit 1
@@ -267,4 +323,7 @@ Write-Output "PASS: $Group ($($script:Passed) tests)"
 
 if ($null -ne $script:BuildContext -and (Test-Path -LiteralPath $script:BuildContext.Root)) {
     Remove-Item -LiteralPath $script:BuildContext.Root -Recurse -Force -ErrorAction SilentlyContinue
+}
+if ($null -ne $script:PublishRoot -and (Test-Path -LiteralPath $script:PublishRoot)) {
+    Remove-Item -LiteralPath $script:PublishRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
