@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ReportSummaryBuilder.Core/ReportSummaryBuilder.Core.csproj" />
+    <Project Path="src/ReportSummaryBuilder.WinForms/ReportSummaryBuilder.WinForms.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ReportSummaryBuilder.Core.Tests/ReportSummaryBuilder.Core.Tests.csproj" />
+  </Folder>
+</Solution>
