@@ -2,4 +2,5 @@
 **/obj/
 *.user
 release/
+artifacts/
 TestResults/

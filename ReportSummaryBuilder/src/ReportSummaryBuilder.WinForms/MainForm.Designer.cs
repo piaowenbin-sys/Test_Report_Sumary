@@ -2,7 +2,6 @@ namespace ReportSummaryBuilder.WinForms;
 
 partial class MainForm
 {
-    private System.ComponentModel.IContainer? components;
     private Label titleLabel = null!;
     private Label inputLabel = null!;
     private TextBox inputPathTextBox = null!;
@@ -13,12 +12,6 @@ partial class MainForm
     private Label reportCountLabel = null!;
     private Button generateButton = null!;
     private TextBox statusTextBox = null!;
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) components?.Dispose();
-        base.Dispose(disposing);
-    }
 
     private void InitializeComponent()
     {
