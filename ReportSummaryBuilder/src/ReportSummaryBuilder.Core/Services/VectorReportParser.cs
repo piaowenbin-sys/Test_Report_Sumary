@@ -106,28 +106,31 @@ public sealed class VectorReportParser
         var rows = DirectRows(table).Select(RowValues).Where(values => values.Length >= 2).ToArray();
         var outsideIndex = Array.FindIndex(rows, values => LabelEquals(values[0], "Number of failures outside of test cases"));
 
-        int Main(string label)
+        int Required(string label, IEnumerable<string[]> source)
         {
-            var match = rows.FirstOrDefault(values => LabelEquals(values[0], label));
-            return ParseInteger(match is { Length: > 1 } ? match[1] : null);
+            var match = source.FirstOrDefault(values => LabelEquals(values[0], label));
+            if (match is not { Length: > 1 }
+                || !int.TryParse(match[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var number))
+            {
+                throw new ReportInputException("리포트 형식 오류", "필수 통계 값을 읽을 수 없습니다.", label);
+            }
+            return number;
         }
         int Outside(string label)
         {
             if (outsideIndex < 0)
             {
-                return 0;
+                throw new ReportInputException("리포트 형식 오류", "외부 실패 통계 영역을 읽을 수 없습니다.");
             }
-
-            var match = rows.Skip(outsideIndex + 1).FirstOrDefault(values => LabelEquals(values[0], label));
-            return ParseInteger(match is { Length: > 1 } ? match[1] : null);
+            return Required(label, rows.Skip(outsideIndex + 1));
         }
 
         return new ReportStatistics(
-            Main("Executed test cases"),
-            Main("Test cases passed"),
-            Main("Test cases failed"),
-            Main("Test cases inconclusive"),
-            Main("Test cases with error in test system"),
+            Required("Executed test cases", rows),
+            Required("Test cases passed", rows),
+            Required("Test cases failed", rows),
+            Required("Test cases inconclusive", rows),
+            Required("Test cases with error in test system", rows),
             Outside("Inconclusive"),
             Outside("Fail"),
             Outside("Error in test system"));
@@ -183,7 +186,6 @@ public sealed class VectorReportParser
     private static string[] RowValues(HtmlNode row) =>
         (row.SelectNodes("./td") ?? Enumerable.Empty<HtmlNode>()).Select(cell => Normalize(cell.InnerText)).ToArray();
 
-    private static int ParseInteger(string? value) => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) ? number : 0;
     private static bool LabelEquals(string value, string label) => Normalize(value).Equals(label, StringComparison.OrdinalIgnoreCase);
     private static bool ContainsWord(string value, string word) => value.Split([' ', '\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries).Contains(word, StringComparer.OrdinalIgnoreCase);
     private static bool IsTestNumber(string value) => value.Length > 0 && value.Split('.').All(segment => int.TryParse(segment, out _));

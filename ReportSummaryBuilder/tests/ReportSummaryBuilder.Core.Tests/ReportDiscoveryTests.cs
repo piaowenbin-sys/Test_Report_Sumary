@@ -11,9 +11,10 @@ public sealed class ReportDiscoveryTests : IDisposable
     [Fact]
     public void Find_ReturnsOnlyOriginalVectorReports_WithArbitraryNames()
     {
-        var valid = Path.Combine(_directory, "한글 이름 원본.html");
+        var valid = Path.Combine(_directory, "한글 Summary 이름 원본.html");
         File.WriteAllText(valid, MinimalVectorReport("RS4PE", "DRV"));
-        File.WriteAllText(Path.Combine(_directory, "RS4PE_LHD_Combined_Test_Report.html"), MinimalVectorReport("RS4PE", "RR"));
+        File.WriteAllText(Path.Combine(_directory, "RS4PE_LHD_Combined_Test_Report.html"),
+            MinimalVectorReport("RS4PE", "RR").Replace("<html><body>", "<html><head><meta name=\"report-summary-builder\" content=\"generated\"></head><body>"));
         File.WriteAllText(Path.Combine(_directory, "report.bak_20261016.html"), MinimalVectorReport("RS4PE", "AST"));
         File.WriteAllText(Path.Combine(_directory, "ordinary.html"), "<html><body>not a Vector report</body></html>");
         File.WriteAllText(Path.Combine(_directory, "report.xml"), "<report />");

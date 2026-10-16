@@ -1,0 +1,33 @@
+Test Report Summary Builder 1.0.1 verification
+Date: 2026-10-16 KST
+
+FACT CHECK 1 - source tests
+PASS: dotnet test ReportSummaryBuilder.slnx --no-restore -m:1 -nr:false -v:minimal
+Result: 18 passed, 0 failed, 0 skipped
+
+FACT CHECK 2 - portable package with four production reports
+PASS: tests/release-smoke.ps1
+Result: 1 summary HTML, 4 byte-identical detail HTML files, 1 ZIP with exactly 5 HTML entries
+
+FACT CHECK 3 - installer lifecycle
+PASS: tests/installer-smoke.ps1
+Result: silent temporary install, installed executable package generation, and silent uninstall all passed
+
+UI startup smoke: PASS
+
+Artifacts
+Portable: release/portable/ReportSummaryBuilder.exe
+Size: 116643443 bytes
+SHA256: 7EB973AD090895A77CEBB1E46011FDC2FFBFBC4FE312B22E4A61323DCA2D38A1
+
+Installer: release/installer/ReportSummaryBuilder-Setup.exe
+Size: 58131270 bytes
+SHA256: 3642AEC101C0EB192474ADF139DAD55D65805F9240A5F260C5FB24459196966D
+
+Production source snapshots (read-only inputs)
+2026-10-08_08-18-49_RS4_Test_Report.html|5802841|2026-10-08 08:46:55|330777FE88664058BBE287EF86D96FAA6493968486525F4EBBC50F43F61F6EA1
+2026-10-08_10-16-56_RS4_Test_Report.html|5986438|2026-10-08 10:29:56|CE6A1A751FDED7BD117B8BBD2281A66348138BF2967584D4F6DAAB4184140C3B
+2026-10-08_10-42-10_RS4_Test_Report.html|4984426|2026-10-08 10:58:38|DA28F124837D9C457361622BE5F6ACAB7F16091A2CC45E42137A6F96446F3F02
+2026-10-08_11-01-20_RS4_Test_Report.html|4691973|2026-10-08 11:09:21|A98D6197FFC73C7FC7C9AEE6411781C5AC20D5E99B6681AE49769EDC1BD19898
+
+Signing: unsigned internal build; Windows SmartScreen may warn on another PC.

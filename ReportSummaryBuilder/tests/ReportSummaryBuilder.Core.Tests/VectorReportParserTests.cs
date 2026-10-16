@@ -30,6 +30,19 @@ public sealed class VectorReportParserTests : IDisposable
     }
 
     [Theory]
+    [InlineData("Executed test cases", "Executed cases renamed")]
+    [InlineData("<td>2</td>", "<td>not-a-number</td>")]
+    public void Parse_WhenRequiredStatisticsAreInvalid_RejectsReport(string original, string replacement)
+    {
+        var path = Path.Combine(_directory, "invalid-statistics.html");
+        File.WriteAllText(path, ReportDiscoveryTests.MinimalVectorReport("RS4PE", "DRV").Replace(original, replacement));
+
+        var error = Assert.Throws<Errors.ReportInputException>(() => new VectorReportParser().Parse(path));
+
+        Assert.Equal("리포트 형식 오류", error.Title);
+    }
+
+    [Theory]
     [InlineData(@"C:\Users\USER.K1109684\Downloads\TestReport\2026-10-08_08-18-49_RS4_Test_Report.html", "DRV", 132, 110, 22, 179)]
     [InlineData(@"C:\Users\USER.K1109684\Downloads\TestReport\2026-10-08_11-01-20_RS4_Test_Report.html", "RR", 102, 102, 0, 149)]
     public void Parse_MatchesKnownOriginalReports(string path, string position, int executed, int passed, int failed, int itemCount)

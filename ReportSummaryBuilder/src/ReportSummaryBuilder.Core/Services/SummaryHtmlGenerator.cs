@@ -29,7 +29,7 @@ public sealed partial class SummaryHtmlGenerator
 
         var html = new StringBuilder(16_384);
         html.Append("""
-            <!doctype html><html lang="ko"><head><meta charset="utf-8">
+            <!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="report-summary-builder" content="generated">
             <meta name="viewport" content="width=device-width,initial-scale=1">
             <title>통합 테스트 리포트 서머리</title>
             <style>
@@ -56,7 +56,7 @@ public sealed partial class SummaryHtmlGenerator
             var detailFile = ReportPackageGenerator.GetDetailFileName(report);
             html.Append("<tr><td>").Append(Encode(report.Position)).Append("</td><td>").Append(report.Statistics.Executed)
                 .Append("</td><td class=\"Pass\">").Append(report.Statistics.Pass).Append("</td><td class=\"Fail\">")
-                .Append(report.Statistics.Fail).Append("</td><td><a href=\"").Append(Link(detailDirectoryName, detailFile, null))
+                .Append(report.Statistics.Fail).Append("</td><td><a target=\"_blank\" rel=\"noopener\" href=\"").Append(Link(detailDirectoryName, detailFile, null))
                 .Append("\">원본 상세 보기</a></td></tr>");
         }
         html.Append("</tbody></table><h2>Integrated Functional Test Summary</h2><table><thead><tr><th>Position</th><th>Area</th><th>Category</th><th>Results and details</th></tr></thead>");
@@ -113,7 +113,7 @@ public sealed partial class SummaryHtmlGenerator
         var descendants = report.TestItems.Where(candidate => candidate.Number.StartsWith(item.Number + ".", StringComparison.Ordinal)).ToArray();
         var detailFile = ReportPackageGenerator.GetDetailFileName(report);
         var childId = $"{SafeId(report.Position)}-children-{groupIndex}-{itemIndex}";
-        html.Append("<tr><td>").Append(Encode(item.Number)).Append("</td><td><a href=\"")
+        html.Append("<tr><td>").Append(Encode(item.Number)).Append("</td><td><a target=\"_blank\" rel=\"noopener\" href=\"")
             .Append(Link(detailDirectoryName, detailFile, item.Href)).Append("\">").Append(Encode(item.Text))
             .Append("</a></td><td class=\"").Append(item.EffectiveVerdict).Append("\">").Append(item.EffectiveVerdict).Append("</td><td>");
         if (descendants.Length > 0)
@@ -127,7 +127,7 @@ public sealed partial class SummaryHtmlGenerator
         html.Append("<tr><td colspan=\"4\"><div class=\"details\" id=\"").Append(childId).Append("\"><table class=\"nested\"><tr><th>하위 TC</th><th>Test item</th><th>Verdict</th></tr>");
         foreach (var child in descendants)
         {
-            html.Append("<tr><td>").Append(Encode(child.Number)).Append("</td><td><a href=\"")
+            html.Append("<tr><td>").Append(Encode(child.Number)).Append("</td><td><a target=\"_blank\" rel=\"noopener\" href=\"")
                 .Append(Link(detailDirectoryName, detailFile, child.Href)).Append("\">").Append(Encode(child.Text))
                 .Append("</a></td><td class=\"").Append(child.EffectiveVerdict).Append("\">").Append(child.EffectiveVerdict).Append("</td></tr>");
         }

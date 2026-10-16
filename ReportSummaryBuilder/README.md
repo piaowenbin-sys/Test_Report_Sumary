@@ -22,7 +22,7 @@ Vector CANoe/vTESTstudio HTML 리포트 여러 개를 한 번에 읽어 통합 �
 
 ```powershell
 dotnet test .\ReportSummaryBuilder.slnx -m:1 -nr:false
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Version 1.0.0
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\release-smoke.ps1
 ```
 

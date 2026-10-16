@@ -27,6 +27,8 @@ public sealed class SummaryHtmlGeneratorTests
         Assert.Contains("data-category=\"C104\"", html);
         Assert.Contains("하위 TC 1개", html);
         Assert.Contains("RS4PE_MIXED_details/DRV_report.html#c104", html);
+        Assert.Contains("target=\"_blank\"", html);
+        Assert.Contains("name=\"report-summary-builder\"", html);
         Assert.Contains("toggleDetails", html);
         Assert.DoesNotContain("TestModuleInfo", html);
         Assert.DoesNotContain("<iframe", html, StringComparison.OrdinalIgnoreCase);

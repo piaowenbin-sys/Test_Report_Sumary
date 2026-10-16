@@ -6,10 +6,14 @@ namespace ReportSummaryBuilder.WinForms;
 public partial class MainForm : Form
 {
     private readonly ReportWorkflow _workflow = new();
+    private CancellationTokenSource? _generationCancellation;
+    private bool _isGenerating;
+    private bool _closeAfterCancellation;
 
     public MainForm()
     {
         InitializeComponent();
+        FormClosing += MainForm_FormClosing;
     }
 
     private void BrowseInputButton_Click(object? sender, EventArgs e)
@@ -58,6 +62,8 @@ public partial class MainForm : Form
 
     private async void GenerateButton_Click(object? sender, EventArgs e)
     {
+        _isGenerating = true;
+        _generationCancellation = new CancellationTokenSource();
         generateButton.Enabled = false;
         browseInputButton.Enabled = false;
         browseOutputButton.Enabled = false;
@@ -65,7 +71,7 @@ public partial class MainForm : Form
 
         try
         {
-            var result = await Task.Run(() => _workflow.RunAsync(inputPathTextBox.Text, outputPathTextBox.Text, CancellationToken.None));
+            var result = await Task.Run(() => _workflow.RunAsync(inputPathTextBox.Text, outputPathTextBox.Text, _generationCancellation.Token));
             statusTextBox.Text = $"완료\r\n서머리: {result.SummaryPath}\r\nZIP: {result.ZipPath}\r\n상세 HTML: {result.DetailPaths.Count}개";
             MessageBox.Show(this, "서머리와 ZIP 생성이 완료되었습니다.", "완료", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -77,6 +83,10 @@ public partial class MainForm : Form
                 : $"{exception.UserMessage}\r\n\r\n{exception.Details}";
             MessageBox.Show(this, message, exception.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+        catch (OperationCanceledException)
+        {
+            statusTextBox.Text = "생성이 취소되었습니다.";
+        }
         catch (Exception exception)
         {
             statusTextBox.Text = exception.Message;
@@ -84,9 +94,22 @@ public partial class MainForm : Form
         }
         finally
         {
+            _generationCancellation.Dispose();
+            _generationCancellation = null;
+            _isGenerating = false;
             browseInputButton.Enabled = true;
             browseOutputButton.Enabled = true;
             RefreshReportCount();
+            if (_closeAfterCancellation) BeginInvoke(Close);
         }
+    }
+
+    private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (!_isGenerating) return;
+        _closeAfterCancellation = true;
+        _generationCancellation?.Cancel();
+        statusTextBox.Text = "안전하게 취소하는 중입니다...";
+        e.Cancel = true;
     }
 }

@@ -17,6 +17,7 @@ public class ReportPackageGenerator
         var outputFullPath = Path.GetFullPath(outputDirectory);
         var parent = Directory.GetParent(outputFullPath)?.FullName ?? throw new ReportInputException("출력 폴더 오류", "출력 폴더의 상위 경로를 확인할 수 없습니다.");
         Directory.CreateDirectory(parent);
+        using var outputLock = AcquireOutputLock(outputFullPath);
 
         var stem = GetPackageStem(reports);
         var summaryName = $"{stem}_Combined_Test_Report.html";
@@ -58,7 +59,7 @@ public class ReportPackageGenerator
                 }
             }
 
-            ValidateZip(stageZip, summaryName, detailDirectoryName, stageDetails);
+            ValidateZip(stageZip, summaryName, detailDirectoryName, stageSummary, stageDetails);
             await BeforePublishAsync(staging, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -118,12 +119,34 @@ public class ReportPackageGenerator
         }
     }
 
-    private static void ValidateZip(string zipPath, string summaryName, string detailDirectoryName, IReadOnlyList<string> details)
+    private static void ValidateZip(string zipPath, string summaryName, string detailDirectoryName, string summaryPath, IReadOnlyList<string> details)
     {
         using var archive = ZipFile.OpenRead(zipPath);
-        var expected = new[] { summaryName }.Concat(details.Select(detail => $"{detailDirectoryName}/{Path.GetFileName(detail)}")).Order(StringComparer.Ordinal).ToArray();
+        var expectedFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [summaryName] = summaryPath
+        };
+        foreach (var detail in details) expectedFiles[$"{detailDirectoryName}/{Path.GetFileName(detail)}"] = detail;
+        var expected = expectedFiles.Keys.Order(StringComparer.Ordinal).ToArray();
         var actual = archive.Entries.Select(entry => entry.FullName.Replace('\\', '/')).Order(StringComparer.Ordinal).ToArray();
         if (!expected.SequenceEqual(actual, StringComparer.Ordinal)) throw new IOException("ZIP 파일 목록 검증에 실패했습니다.");
+        foreach (var entry in archive.Entries)
+        {
+            var entryName = entry.FullName.Replace('\\', '/');
+            using var stream = entry.Open();
+            var archivedHash = Convert.ToHexString(SHA256.HashData(stream));
+            var sourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(expectedFiles[entryName])));
+            if (!archivedHash.Equals(sourceHash, StringComparison.Ordinal)) throw new IOException($"ZIP 내용 검증에 실패했습니다: {entryName}");
+        }
+    }
+
+    private static IDisposable AcquireOutputLock(string outputDirectory)
+    {
+        var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(outputDirectory.ToUpperInvariant())));
+        var semaphore = new Semaphore(1, 1, $"Local\\ReportSummaryBuilder_{key}");
+        if (semaphore.WaitOne(0)) return new SemaphoreHandle(semaphore);
+        semaphore.Dispose();
+        throw new ReportInputException("출력 폴더 사용 중", "같은 출력 폴더에서 다른 생성 작업이 진행 중입니다.");
     }
 
     private static IReadOnlyList<string> PublishWithRollback((string Stage, string Target, bool IsDirectory)[] targets, CancellationToken cancellationToken)
@@ -170,5 +193,14 @@ public class ReportPackageGenerator
         var counter = 1;
         while (File.Exists(candidate) || Directory.Exists(candidate)) candidate = $"{basePath}_{counter++}";
         return candidate;
+    }
+
+    private sealed class SemaphoreHandle(Semaphore semaphore) : IDisposable
+    {
+        public void Dispose()
+        {
+            semaphore.Release();
+            semaphore.Dispose();
+        }
     }
 }

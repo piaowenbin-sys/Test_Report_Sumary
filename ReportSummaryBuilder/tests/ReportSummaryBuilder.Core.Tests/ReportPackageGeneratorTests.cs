@@ -72,6 +72,23 @@ public sealed class ReportPackageGeneratorTests : IDisposable
         Assert.All(first.DetailPaths, path => Assert.True(File.Exists(path)));
     }
 
+    [Fact]
+    public async Task GenerateAsync_WhenSameOutputIsAlreadyPublishing_RejectsConcurrentRun()
+    {
+        var reports = CreateReports("RS4PE");
+        var output = Path.Combine(_root, "output");
+        var blocking = new BlockingPackageGenerator();
+        var first = blocking.GenerateAsync(reports, output, CancellationToken.None);
+        await blocking.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var error = await Assert.ThrowsAsync<Errors.ReportInputException>(() =>
+            new ReportPackageGenerator().GenerateAsync(reports, output, CancellationToken.None));
+
+        Assert.Equal("출력 폴더 사용 중", error.Title);
+        blocking.Release.SetResult();
+        await first;
+    }
+
     private IReadOnlyList<ReportModel> CreateReports(string project)
     {
         var parser = new VectorReportParser();
@@ -89,5 +106,17 @@ public sealed class ReportPackageGeneratorTests : IDisposable
     {
         protected override Task BeforePublishAsync(string stagingDirectory, CancellationToken cancellationToken) =>
             throw new IOException("forced staging failure");
+    }
+
+    private sealed class BlockingPackageGenerator : ReportPackageGenerator
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override async Task BeforePublishAsync(string stagingDirectory, CancellationToken cancellationToken)
+        {
+            Entered.SetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+        }
     }
 }

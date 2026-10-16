@@ -6,8 +6,6 @@ public sealed class ReportDiscovery
 {
     private static readonly string[] GeneratedNameMarkers =
     [
-        "Combined_Test_Report",
-        "Summary",
         ".bak_"
     ];
 
@@ -37,6 +35,11 @@ public sealed class ReportDiscovery
     {
         using var reader = new StreamReader(path, detectEncodingFromByteOrderMarks: true);
         var text = reader.ReadToEnd();
+        if (text.Contains("name=\"report-summary-builder\"", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("COMBINED_FUNCTIONAL_SUMMARY_END", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
         return text.Contains("Var_Project:", StringComparison.OrdinalIgnoreCase)
             && text.Contains("Var_SBCM_Position:", StringComparison.OrdinalIgnoreCase)
             && text.Contains(">Statistics<", StringComparison.OrdinalIgnoreCase)
